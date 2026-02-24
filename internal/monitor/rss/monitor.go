@@ -14,7 +14,13 @@ import (
 
 	"github.com/mmcdole/gofeed"
 	"github.com/tdawe1/gengowatcher-go/internal/config"
+	"github.com/tdawe1/gengowatcher-go/internal/dedupe"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
+)
+
+const (
+	defaultRSSDedupeTTL = 72 * time.Hour
+	defaultRSSDedupeCap = 50_000
 )
 
 type Monitor struct {
@@ -22,7 +28,7 @@ type Monitor struct {
 	checkInterval time.Duration
 	minReward     float64
 	stateMu       sync.Mutex
-	seen          map[string]struct{}
+	dedupe        *dedupe.Gate
 	primed        bool
 	fetchTimeout  time.Duration
 	inFlight      atomic.Bool
@@ -44,7 +50,7 @@ func New(cfg config.RSSConfig, checkInterval time.Duration, minReward float64) *
 		cfg:           cfg,
 		checkInterval: checkInterval,
 		minReward:     minReward,
-		seen:          make(map[string]struct{}),
+		dedupe:        dedupe.New(defaultRSSDedupeTTL, defaultRSSDedupeCap),
 		fetchTimeout:  30 * time.Second,
 		pauseFile:     cfg.PauseFile,
 		pauseSleep:    pauseSleep,
@@ -203,7 +209,7 @@ func (m *Monitor) primeOnce(ctx context.Context) error {
 		}
 
 		if itemKey := dedupeKey(item); itemKey != "" {
-			m.seen[itemKey] = struct{}{}
+			m.dedupe.FirstSeen(itemKey)
 		}
 	}
 
@@ -323,15 +329,7 @@ func (m *Monitor) shouldEmit(itemKey string, reward float64) bool {
 		return true
 	}
 
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-
-	if _, exists := m.seen[itemKey]; exists {
-		return false
-	}
-
-	m.seen[itemKey] = struct{}{}
-	return true
+	return m.dedupe.FirstSeen(itemKey)
 }
 
 func (m *Monitor) isPrimed() bool {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/mmcdole/gofeed"
 	"github.com/tdawe1/gengowatcher-go/internal/config"
+	"github.com/tdawe1/gengowatcher-go/internal/dedupe"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
 )
 
@@ -129,6 +130,25 @@ func TestStart_DeduplicatesAndAppliesMinReward(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected Start goroutine to exit after cancel")
+	}
+}
+
+func TestShouldEmit_AllowsPreviouslySeenKeyAfterDedupeTTL(t *testing.T) {
+	m := New(config.RSSConfig{Enabled: true, URL: "https://example.com/jobs.rss"}, time.Second, 0)
+	m.dedupe = dedupe.New(30*time.Millisecond, 2)
+
+	if !m.shouldEmit("guid:job-1", 1.0) {
+		t.Fatal("expected first emit")
+	}
+
+	if m.shouldEmit("guid:job-1", 1.0) {
+		t.Fatal("expected suppression before ttl")
+	}
+
+	time.Sleep(40 * time.Millisecond)
+
+	if !m.shouldEmit("guid:job-1", 1.0) {
+		t.Fatal("expected emit after ttl")
 	}
 }
 
