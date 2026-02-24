@@ -48,6 +48,12 @@ type RSSConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// URL is the RSS feed URL.
 	URL string `mapstructure:"url"`
+	// PauseFile pauses RSS polling while this file exists.
+	PauseFile string `mapstructure:"pause_file"`
+	// PauseSleep is the sleep duration between pause-file checks.
+	PauseSleep time.Duration `mapstructure:"pause_sleep"`
+	// MaxBackoff is the maximum exponential backoff after RSS failures.
+	MaxBackoff time.Duration `mapstructure:"max_backoff"`
 }
 
 // EmailConfig contains email monitor settings.
@@ -118,6 +124,9 @@ func Load(configFile string) (*Config, error) {
 	_ = v.BindEnv("watcher.check_interval", "GENGO_CHECK_INTERVAL")
 	_ = v.BindEnv("watcher.min_reward", "GENGO_MIN_REWARD")
 	_ = v.BindEnv("state.file", "GENGO_STATE_FILE")
+	_ = v.BindEnv("rss.pause_file", "GENGO_RSS_PAUSE_FILE")
+	_ = v.BindEnv("rss.pause_sleep", "GENGO_RSS_PAUSE_SLEEP")
+	_ = v.BindEnv("rss.max_backoff", "GENGO_RSS_MAX_BACKOFF")
 
 	// Read config file (ignore if not found, use defaults)
 	if err := v.ReadInConfig(); err != nil {
@@ -153,6 +162,9 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("rss.enabled", DefaultEnabled.RSS)
 	v.SetDefault("rss.url", DefaultRSSURL)
+	v.SetDefault("rss.pause_file", DefaultRSSPauseFile)
+	v.SetDefault("rss.pause_sleep", DefaultRSSPauseSleep)
+	v.SetDefault("rss.max_backoff", DefaultRSSMaxBackoff)
 
 	v.SetDefault("email.enabled", DefaultEnabled.Email)
 
@@ -180,6 +192,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.RSS.URL == "" {
 		cfg.RSS.URL = DefaultRSSURL
 	}
+	if cfg.RSS.PauseSleep <= 0 {
+		cfg.RSS.PauseSleep = DefaultRSSPauseSleep
+	}
+	if cfg.RSS.MaxBackoff <= 0 {
+		cfg.RSS.MaxBackoff = DefaultRSSMaxBackoff
+	}
 	if cfg.State.File == "" {
 		cfg.State.File = DefaultStateFile
 	}
@@ -197,9 +215,6 @@ func (c *Config) Validate() error {
 		if c.WebSocket.UserSession == "" {
 			return fmt.Errorf("websocket enabled but GENGO_USER_SESSION not set")
 		}
-		if c.WebSocket.UserKey == "" {
-			return fmt.Errorf("websocket enabled but GENGO_USER_KEY not set")
-		}
 	}
 
 	if c.Email.Enabled {
@@ -211,6 +226,13 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.RSS.PauseSleep < 0 {
+		return fmt.Errorf("rss.pause_sleep must be >= 0")
+	}
+	if c.RSS.MaxBackoff <= 0 {
+		return fmt.Errorf("rss.max_backoff must be > 0")
+	}
+
 	return nil
 }
 
@@ -218,4 +240,3 @@ func (c *Config) Validate() error {
 func (c *Config) HasEnabledMonitors() bool {
 	return c.WebSocket.Enabled || c.RSS.Enabled || c.Email.Enabled || c.Website.Enabled
 }
-

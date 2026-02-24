@@ -15,8 +15,11 @@ const (
 	DefaultWebSocketURL     = "wss://live-dashboard.gengo.com"
 
 	// RSS defaults
-	DefaultRSSEnabled = true
-	DefaultRSSURL     = "https://gengo.com/t/jobs.rss"
+	DefaultRSSEnabled    = true
+	DefaultRSSURL        = "https://gengo.com/t/jobs.rss"
+	DefaultRSSPauseFile  = ""
+	DefaultRSSPauseSleep = 30 * time.Second
+	DefaultRSSMaxBackoff = 5 * time.Minute
 
 	// Email defaults
 	DefaultEmailEnabled = false
@@ -46,4 +49,3 @@ var DefaultEnabled = struct {
 	Email:     DefaultEmailEnabled,
 	Website:   DefaultWebsiteEnabled,
 }
-
