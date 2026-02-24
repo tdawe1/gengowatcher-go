@@ -8,6 +8,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+const minRSSCheckInterval = 31 * time.Second
+
 // Config is the root configuration structure for GengoWatcher.
 // It contains all settings for the watcher, monitors, notifications, and state.
 type Config struct {
@@ -224,6 +226,10 @@ func (c *Config) Validate() error {
 		if c.Email.TokenPath == "" {
 			return fmt.Errorf("email enabled but token_path not set")
 		}
+	}
+
+	if c.RSS.Enabled && c.Watcher.CheckInterval < minRSSCheckInterval {
+		return fmt.Errorf("watcher.check_interval must be >= %s when rss is enabled", minRSSCheckInterval)
 	}
 
 	if c.RSS.PauseSleep < 0 {

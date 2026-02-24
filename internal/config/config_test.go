@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestValidate_WebSocketUserKeyOptional(t *testing.T) {
 	cfg := &Config{
@@ -48,5 +51,20 @@ func TestValidate_WebSocketRequiresIDAndSession(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestValidate_RSSEnabledRequiresMinCheckInterval(t *testing.T) {
+	cfg := &Config{
+		Watcher: WatcherConfig{CheckInterval: 30 * time.Second},
+		RSS: RSSConfig{
+			Enabled:    true,
+			PauseSleep: 1,
+			MaxBackoff: 1,
+		},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for rss enabled with check interval below 31s")
 	}
 }
