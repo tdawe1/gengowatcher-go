@@ -383,7 +383,7 @@ for event := range events {
 ## Implementation Phases
 
 1. **Phase 1 (Completed):** Core types, monitor interface, config system
-2. **Phase 2 (In Progress):** WebSocket + RSS monitors
+2. **Phase 2 (In Progress):** WebSocket + RSS monitors (RSS/WS parity patch robustness is complete)
 3. **Phase 3:** TUI with jobs table and basic stats
 4. **Phase 4:** State persistence, notifications
 5. **Phase 5:** Email + Website monitors
