@@ -16,11 +16,13 @@ import (
 )
 
 type Monitor struct {
-	cfg              config.WebSocketConfig
-	dialer           *websocket.Dialer
-	readTimeout      time.Duration
-	reconnectMinWait time.Duration
-	reconnectMaxWait time.Duration
+	cfg               config.WebSocketConfig
+	dialer            *websocket.Dialer
+	readTimeout       time.Duration
+	heartbeatInterval time.Duration
+	pongWait          time.Duration
+	reconnectMinWait  time.Duration
+	reconnectMaxWait  time.Duration
 }
 
 type socketAuth struct {
@@ -31,11 +33,12 @@ type socketAuth struct {
 
 func New(cfg config.WebSocketConfig) *Monitor {
 	return &Monitor{
-		cfg:              cfg,
-		dialer:           websocket.DefaultDialer,
-		readTimeout:      30 * time.Second,
-		reconnectMinWait: 250 * time.Millisecond,
-		reconnectMaxWait: 4 * time.Second,
+		cfg:               cfg,
+		dialer:            websocket.DefaultDialer,
+		readTimeout:       30 * time.Second,
+		heartbeatInterval: 10 * time.Second,
+		reconnectMinWait:  250 * time.Millisecond,
+		reconnectMaxWait:  4 * time.Second,
 	}
 }
 
@@ -97,6 +100,23 @@ func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEven
 	}
 
 	connected := true
+	effectivePongWait := m.effectivePongWait()
+	effectiveHeartbeatInterval := m.effectiveHeartbeatInterval()
+
+	if effectivePongWait > 0 {
+		if err := conn.SetReadDeadline(time.Now().Add(effectivePongWait)); err != nil {
+			return err, connected
+		}
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(effectivePongWait))
+		})
+	}
+
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	defer cancelHeartbeat()
+	if effectiveHeartbeatInterval > 0 {
+		go m.runHeartbeat(heartbeatCtx, conn, effectiveHeartbeatInterval)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -109,18 +129,18 @@ func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEven
 	defer close(done)
 
 	for {
-		if m.readTimeout > 0 {
-			if err := conn.SetReadDeadline(time.Now().Add(m.readTimeout)); err != nil {
-				return err, connected
-			}
-		}
-
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, false
 			}
 			return err, connected
+		}
+
+		if effectivePongWait > 0 {
+			if err := conn.SetReadDeadline(time.Now().Add(effectivePongWait)); err != nil {
+				return err, connected
+			}
 		}
 
 		event, ok := parseJobPublished(payload)
@@ -132,6 +152,43 @@ func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEven
 		case events <- event:
 		case <-ctx.Done():
 			return nil, false
+		}
+	}
+}
+
+func (m *Monitor) effectivePongWait() time.Duration {
+	if m.pongWait > 0 {
+		return m.pongWait
+	}
+
+	return m.readTimeout
+}
+
+func (m *Monitor) effectiveHeartbeatInterval() time.Duration {
+	if m.heartbeatInterval <= 0 {
+		return 0
+	}
+
+	if m.effectivePongWait() <= 0 {
+		return 0
+	}
+
+	return m.heartbeatInterval
+}
+
+func (m *Monitor) runHeartbeat(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(interval)); err != nil {
+				_ = conn.Close()
+				return
+			}
 		}
 	}
 }

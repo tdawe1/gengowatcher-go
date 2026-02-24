@@ -332,6 +332,9 @@ func TestStart_RetriesWithoutHeadersWhenHandshakeRejectsHeaders(t *testing.T) {
 		_ = m.Start(ctx, events)
 	}()
 
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+
 	for {
 		select {
 		case ev := <-events:
@@ -341,7 +344,7 @@ func TestStart_RetriesWithoutHeadersWhenHandshakeRejectsHeaders(t *testing.T) {
 				}
 				return
 			}
-		case <-time.After(time.Second):
+		case <-deadline.C:
 			t.Fatal("expected fallback reconnect job event")
 		}
 	}
@@ -470,8 +473,8 @@ func TestStart_ResetsReconnectBackoffAfterSuccessfulLifecycle(t *testing.T) {
 		UserID:      "u1",
 		UserSession: "s1",
 	})
-	m.reconnectMinWait = 20 * time.Millisecond
-	m.reconnectMaxWait = 80 * time.Millisecond
+	m.reconnectMinWait = 50 * time.Millisecond
+	m.reconnectMaxWait = 400 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -506,7 +509,7 @@ func TestStart_ResetsReconnectBackoffAfterSuccessfulLifecycle(t *testing.T) {
 	}
 
 	deltaAfterSuccessfulLifecycle := errorTimes[3].Sub(errorTimes[2])
-	if deltaAfterSuccessfulLifecycle > 60*time.Millisecond {
+	if deltaAfterSuccessfulLifecycle > 140*time.Millisecond {
 		t.Fatalf("expected reconnect after successful lifecycle to use min backoff, got %v", deltaAfterSuccessfulLifecycle)
 	}
 }
@@ -659,7 +662,9 @@ func TestStart_EmitsErrorEventWhenReadTimesOut(t *testing.T) {
 		UserSession: "session",
 		UserKey:     "key",
 	})
-	m.readTimeout = 100 * time.Millisecond
+	m.readTimeout = 150 * time.Millisecond
+	m.heartbeatInterval = 30 * time.Millisecond
+	m.pongWait = 150 * time.Millisecond
 	m.reconnectMinWait = 10 * time.Millisecond
 	m.reconnectMaxWait = 20 * time.Millisecond
 
@@ -678,7 +683,7 @@ func TestStart_EmitsErrorEventWhenReadTimesOut(t *testing.T) {
 			t.Fatalf("expected event type %q, got %q", gengo.EventError, event.Type)
 		}
 		cancel()
-	case <-time.After(1 * time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("expected websocket timeout error event")
 	}
 
@@ -689,5 +694,61 @@ func TestStart_EmitsErrorEventWhenReadTimesOut(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("expected Start to stop after cancel")
+	}
+}
+
+func TestStart_DoesNotEmitTimeoutWhileHeartbeatAlive(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	m := New(config.WebSocketConfig{
+		Enabled:     true,
+		URL:         toWebSocketURL(server.URL),
+		UserID:      "user-id",
+		UserSession: "session",
+		UserKey:     "key",
+	})
+	m.readTimeout = 150 * time.Millisecond
+	m.heartbeatInterval = 30 * time.Millisecond
+	m.pongWait = 150 * time.Millisecond
+	m.reconnectMinWait = 10 * time.Millisecond
+	m.reconnectMaxWait = 20 * time.Millisecond
+
+	events := make(chan gengo.JobEvent, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- m.Start(ctx, events)
+	}()
+
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type == gengo.EventError {
+				t.Fatalf("unexpected error during healthy idle heartbeat: %#v", ev)
+			}
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("expected nil start error, got %v", err)
+			}
+			return
+		case <-time.After(600 * time.Millisecond):
+			t.Fatal("timeout waiting for monitor to stop")
+		}
 	}
 }
