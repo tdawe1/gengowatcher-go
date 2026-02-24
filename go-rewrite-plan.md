@@ -384,8 +384,9 @@ for event := range events {
 
 1. **Phase 1 (Completed):** Core types, monitor interface, config system
 2. **Phase 2 (In Progress):** WebSocket + RSS monitors (RSS/WS parity patch robustness is complete)
-3. **Phase 3:** TUI with jobs table and basic stats
-4. **Phase 4:** State persistence, notifications
-5. **Phase 5:** Email + Website monitors
-6. **Phase 6:** CLI commands, polish
-7. **Phase 7:** Submodule integration with translation-app
+3. **Phase 2.5 (Hardening In Progress):** RSS/WS reliability, first-seen reaction pipeline, and telemetry instrumentation
+4. **Phase 3:** TUI with jobs table and basic stats
+5. **Phase 4:** State persistence, notifications
+6. **Phase 5:** Email + Website monitors
+7. **Phase 6:** CLI commands, polish
+8. **Phase 7:** Submodule integration with translation-app
