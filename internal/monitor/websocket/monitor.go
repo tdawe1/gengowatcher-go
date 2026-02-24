@@ -3,7 +3,10 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,14 +18,22 @@ import (
 type Monitor struct {
 	cfg              config.WebSocketConfig
 	dialer           *websocket.Dialer
+	readTimeout      time.Duration
 	reconnectMinWait time.Duration
 	reconnectMaxWait time.Duration
+}
+
+type socketAuth struct {
+	UserID      string `json:"user_id"`
+	UserSession string `json:"user_session"`
+	UserKey     string `json:"user_key,omitempty"`
 }
 
 func New(cfg config.WebSocketConfig) *Monitor {
 	return &Monitor{
 		cfg:              cfg,
 		dialer:           websocket.DefaultDialer,
+		readTimeout:      30 * time.Second,
 		reconnectMinWait: 250 * time.Millisecond,
 		reconnectMaxWait: 4 * time.Second,
 	}
@@ -31,10 +42,14 @@ func New(cfg config.WebSocketConfig) *Monitor {
 func (m *Monitor) Start(ctx context.Context, events chan<- gengo.JobEvent) error {
 	backoff := m.reconnectMinWait
 	for {
-		err := m.runConnection(ctx, events)
+		err, resetBackoff := m.runConnection(ctx, events)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+
+			if resetBackoff {
+				backoff = m.reconnectMinWait
 			}
 
 			select {
@@ -65,12 +80,23 @@ func (m *Monitor) Start(ctx context.Context, events chan<- gengo.JobEvent) error
 	}
 }
 
-func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEvent) error {
-	conn, _, err := m.dialer.DialContext(ctx, m.cfg.URL, m.authHeaders())
+func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEvent) (error, bool) {
+	conn, err := m.dialWithFallback(ctx)
 	if err != nil {
-		return err
+		return err, false
 	}
 	defer conn.Close()
+
+	auth := socketAuth{
+		UserID:      m.cfg.UserID,
+		UserSession: m.cfg.UserSession,
+		UserKey:     m.cfg.UserKey,
+	}
+	if err := conn.WriteJSON(auth); err != nil {
+		return err, false
+	}
+
+	connected := true
 
 	done := make(chan struct{})
 	go func() {
@@ -83,12 +109,18 @@ func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEven
 	defer close(done)
 
 	for {
+		if m.readTimeout > 0 {
+			if err := conn.SetReadDeadline(time.Now().Add(m.readTimeout)); err != nil {
+				return err, connected
+			}
+		}
+
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return nil, false
 			}
-			return err
+			return err, connected
 		}
 
 		event, ok := parseJobPublished(payload)
@@ -99,22 +131,101 @@ func (m *Monitor) runConnection(ctx context.Context, events chan<- gengo.JobEven
 		select {
 		case events <- event:
 		case <-ctx.Done():
-			return nil
+			return nil, false
 		}
 	}
 }
 
+func (m *Monitor) dialWithFallback(ctx context.Context) (*websocket.Conn, error) {
+	headers := m.authHeaders()
+	conn, resp, err := m.dialer.DialContext(ctx, m.cfg.URL, headers)
+	if err == nil {
+		return conn, nil
+	}
+
+	if len(headers) == 0 || !shouldRetryWithoutHeaders(err, resp) {
+		return nil, err
+	}
+
+	fallbackConn, fallbackResp, fallbackErr := m.dialer.DialContext(ctx, m.cfg.URL, nil)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf(
+			"websocket dial failed with headers then without headers: primary=%s; fallback=%s",
+			formatDialError(err, resp),
+			formatDialError(fallbackErr, fallbackResp),
+		)
+	}
+
+	return fallbackConn, nil
+}
+
+func shouldRetryWithoutHeaders(err error, resp *http.Response) bool {
+	if err == nil || resp == nil {
+		return false
+	}
+
+	bodyText := ""
+	if resp.Body != nil {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if readErr == nil {
+			bodyText = strings.ToLower(string(body))
+		}
+	}
+
+	errText := strings.ToLower(err.Error())
+	headerRejected := hasExplicitHeaderCookieRejectionSignal(errText) || hasExplicitHeaderCookieRejectionSignal(bodyText)
+
+	if !headerRejected {
+		return false
+	}
+
+	return resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized
+}
+
+func hasExplicitHeaderCookieRejectionSignal(text string) bool {
+	if text == "" {
+		return false
+	}
+
+	hasHeaderCookie := strings.Contains(text, "header") || strings.Contains(text, "cookie")
+	if !hasHeaderCookie {
+		return false
+	}
+
+	rejectionTokens := []string{"reject", "rejected", "invalid", "missing", "not allowed", "forbidden", "denied", "unsupported"}
+	for _, token := range rejectionTokens {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func formatDialError(err error, resp *http.Response) string {
+	if err == nil {
+		return "none"
+	}
+
+	if resp == nil {
+		return err.Error()
+	}
+
+	return fmt.Sprintf("%s (status=%d)", err.Error(), resp.StatusCode)
+}
+
 func (m *Monitor) authHeaders() http.Header {
 	headers := http.Header{}
-	cookies := []string{}
+	cookieRequest := &http.Request{Header: make(http.Header)}
 	if m.cfg.UserID != "" {
-		cookies = append(cookies, "user_id="+m.cfg.UserID)
+		cookieRequest.AddCookie(&http.Cookie{Name: "user_id", Value: m.cfg.UserID})
 	}
 	if m.cfg.UserSession != "" {
-		cookies = append(cookies, "session="+m.cfg.UserSession)
+		cookieRequest.AddCookie(&http.Cookie{Name: "session", Value: m.cfg.UserSession})
 	}
-	if len(cookies) > 0 {
-		headers.Set("Cookie", strings.Join(cookies, "; "))
+	if cookie := cookieRequest.Header.Get("Cookie"); cookie != "" {
+		headers.Set("Cookie", cookie)
 	}
 	if m.cfg.UserKey != "" {
 		headers.Set("X-User-Key", m.cfg.UserKey)
@@ -123,14 +234,30 @@ func (m *Monitor) authHeaders() http.Header {
 }
 
 type socketEnvelope struct {
-	Event string          `json:"event"`
-	Data  json.RawMessage `json:"data"`
+	Event      string          `json:"event"`
+	Type       string          `json:"type"`
+	Data       json.RawMessage `json:"data"`
+	Collection json.RawMessage `json:"collection"`
 }
 
 type socketJob struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
-	URL   string `json:"url"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	URL        string  `json:"url"`
+	Reward     float64 `json:"reward"`
+	Rewards    float64 `json:"rewards"`
+	SourceLC   string  `json:"lc_src"`
+	TargetLC   string  `json:"lc_tgt"`
+	SourceLang string  `json:"source_lang"`
+	TargetLang string  `json:"target_lang"`
+}
+
+type availableCollection struct {
+	ID      json.RawMessage `json:"id"`
+	Reward  float64         `json:"reward"`
+	Rewards float64         `json:"rewards"`
+	Source  string          `json:"lc_src"`
+	Target  string          `json:"lc_tgt"`
 }
 
 func parseJobPublished(payload []byte) (gengo.JobEvent, bool) {
@@ -138,23 +265,109 @@ func parseJobPublished(payload []byte) (gengo.JobEvent, bool) {
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return gengo.JobEvent{}, false
 	}
-	if envelope.Event != "job_published" {
-		return gengo.JobEvent{}, false
+
+	if envelope.Event == "job_published" {
+		var data socketJob
+		if err := json.Unmarshal(envelope.Data, &data); err != nil {
+			return gengo.JobEvent{}, false
+		}
+		if data.ID == "" {
+			return gengo.JobEvent{}, false
+		}
+
+		reward := data.Reward
+		if reward == 0 {
+			reward = data.Rewards
+		}
+		language := buildLanguage(data.SourceLC, data.TargetLC)
+		if language == "" {
+			language = buildLanguage(data.SourceLang, data.TargetLang)
+		}
+
+		return gengo.NewJobEvent(
+			gengo.EventJobFound,
+			gengo.SourceWebSocket,
+			&gengo.Job{
+				ID:       data.ID,
+				Title:    data.Title,
+				URL:      data.URL,
+				Source:   gengo.SourceWebSocket,
+				Reward:   reward,
+				Language: language,
+				FoundAt:  time.Now(),
+			},
+		), true
 	}
 
-	var data socketJob
-	if err := json.Unmarshal(envelope.Data, &data); err != nil {
-		return gengo.JobEvent{}, false
-	}
-	if data.ID == "" {
-		return gengo.JobEvent{}, false
+	if envelope.Type == "available_collection" {
+		body := envelope.Collection
+		if len(body) == 0 {
+			body = envelope.Data
+		}
+		if len(body) == 0 {
+			return gengo.JobEvent{}, false
+		}
+
+		var data availableCollection
+		if err := json.Unmarshal(body, &data); err != nil {
+			return gengo.JobEvent{}, false
+		}
+		id, ok := parseCollectionID(data.ID)
+		if !ok {
+			return gengo.JobEvent{}, false
+		}
+
+		reward := data.Reward
+		if reward == 0 {
+			reward = data.Rewards
+		}
+
+		return gengo.NewJobEvent(
+			gengo.EventJobFound,
+			gengo.SourceWebSocket,
+			&gengo.Job{
+				ID:       id,
+				Source:   gengo.SourceWebSocket,
+				Reward:   reward,
+				Language: buildLanguage(data.Source, data.Target),
+				FoundAt:  time.Now(),
+			},
+		), true
 	}
 
-	return gengo.NewJobEvent(
-		gengo.EventJobFound,
-		gengo.SourceWebSocket,
-		&gengo.Job{ID: data.ID, Title: data.Title, URL: data.URL, Source: gengo.SourceWebSocket, FoundAt: time.Now()},
-	), true
+	return gengo.JobEvent{}, false
+}
+
+func parseCollectionID(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		asString = strings.TrimSpace(asString)
+		return asString, asString != ""
+	}
+
+	var asNumber json.Number
+	if err := json.Unmarshal(raw, &asNumber); err == nil {
+		return asNumber.String(), asNumber.String() != ""
+	}
+
+	var asFloat float64
+	if err := json.Unmarshal(raw, &asFloat); err == nil {
+		return strconv.FormatFloat(asFloat, 'f', -1, 64), true
+	}
+
+	return "", false
+}
+
+func buildLanguage(src string, tgt string) string {
+	if src == "" || tgt == "" {
+		return ""
+	}
+
+	return src + " -> " + tgt
 }
 
 func (m *Monitor) Name() string {
@@ -166,5 +379,5 @@ func (m *Monitor) Source() gengo.Source {
 }
 
 func (m *Monitor) Enabled() bool {
-	return m.cfg.Enabled && m.cfg.URL != "" && m.cfg.UserID != "" && m.cfg.UserSession != "" && m.cfg.UserKey != ""
+	return m.cfg.Enabled && m.cfg.URL != "" && m.cfg.UserID != "" && m.cfg.UserSession != ""
 }
