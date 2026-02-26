@@ -30,6 +30,8 @@ type Monitor struct {
 	stateMu       sync.Mutex
 	dedupe        *dedupe.Gate
 	primed        bool
+	etag          string
+	lastModified  string
 	fetchTimeout  time.Duration
 	inFlight      atomic.Bool
 	pauseFile     string
@@ -223,15 +225,30 @@ func (m *Monitor) fetchItems(ctx context.Context) ([]*gofeed.Item, error) {
 		return nil, err
 	}
 
+	etag, lastModified := m.conditionalRequestHeaders()
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		m.updateConditionalRequestHeaders(resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+		return nil, nil
+	}
+
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("rss feed request failed: status %d", resp.StatusCode)
 	}
+
+	m.updateConditionalRequestHeaders(resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
 
 	feed, err := gofeed.NewParser().Parse(resp.Body)
 	if err != nil {
@@ -239,6 +256,32 @@ func (m *Monitor) fetchItems(ctx context.Context) ([]*gofeed.Item, error) {
 	}
 
 	return feed.Items, nil
+}
+
+func (m *Monitor) conditionalRequestHeaders() (string, string) {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+
+	return m.etag, m.lastModified
+}
+
+func (m *Monitor) updateConditionalRequestHeaders(etag string, lastModified string) {
+	etag = strings.TrimSpace(etag)
+	lastModified = strings.TrimSpace(lastModified)
+
+	if etag == "" && lastModified == "" {
+		return
+	}
+
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+
+	if etag != "" {
+		m.etag = etag
+	}
+	if lastModified != "" {
+		m.lastModified = lastModified
+	}
 }
 
 func (m *Monitor) withFetchTimeout(ctx context.Context) (context.Context, context.CancelFunc) {

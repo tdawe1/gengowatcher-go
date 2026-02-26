@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -16,13 +18,15 @@ import (
 )
 
 type Monitor struct {
-	cfg               config.WebSocketConfig
-	dialer            *websocket.Dialer
-	readTimeout       time.Duration
-	heartbeatInterval time.Duration
-	pongWait          time.Duration
-	reconnectMinWait  time.Duration
-	reconnectMaxWait  time.Duration
+	cfg                     config.WebSocketConfig
+	dialer                  *websocket.Dialer
+	readTimeout             time.Duration
+	heartbeatInterval       time.Duration
+	pongWait                time.Duration
+	reconnectMinWait        time.Duration
+	reconnectMaxWait        time.Duration
+	reconnectJitterFraction float64
+	randFloat64             func() float64
 }
 
 type socketAuth struct {
@@ -33,12 +37,14 @@ type socketAuth struct {
 
 func New(cfg config.WebSocketConfig) *Monitor {
 	return &Monitor{
-		cfg:               cfg,
-		dialer:            websocket.DefaultDialer,
-		readTimeout:       30 * time.Second,
-		heartbeatInterval: 10 * time.Second,
-		reconnectMinWait:  250 * time.Millisecond,
-		reconnectMaxWait:  4 * time.Second,
+		cfg:                     cfg,
+		dialer:                  websocket.DefaultDialer,
+		readTimeout:             30 * time.Second,
+		heartbeatInterval:       10 * time.Second,
+		reconnectMinWait:        250 * time.Millisecond,
+		reconnectMaxWait:        4 * time.Second,
+		reconnectJitterFraction: 0.20,
+		randFloat64:             newRandFloat64(),
 	}
 }
 
@@ -62,7 +68,7 @@ func (m *Monitor) Start(ctx context.Context, events chan<- gengo.JobEvent) error
 			}
 
 			select {
-			case <-time.After(backoff):
+			case <-time.After(m.applyReconnectJitter(backoff)):
 			case <-ctx.Done():
 				return nil
 			}
@@ -190,6 +196,53 @@ func (m *Monitor) runHeartbeat(ctx context.Context, conn *websocket.Conn, interv
 				return
 			}
 		}
+	}
+}
+
+func (m *Monitor) applyReconnectJitter(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+
+	fraction := m.reconnectJitterFraction
+	if fraction <= 0 {
+		return base
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+
+	randFn := m.randFloat64
+	if randFn == nil {
+		randFn = newRandFloat64()
+	}
+
+	r := randFn()
+	if r < 0 {
+		r = 0
+	}
+	if r > 1 {
+		r = 1
+	}
+
+	multiplier := (1 - fraction) + (2 * fraction * r)
+	jittered := time.Duration(float64(base) * multiplier)
+	if jittered <= 0 {
+		return base
+	}
+
+	return jittered
+}
+
+func newRandFloat64() func() float64 {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	var mu sync.Mutex
+
+	return func() float64 {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return rng.Float64()
 	}
 }
 

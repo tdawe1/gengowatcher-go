@@ -518,6 +518,124 @@ func TestPollOnce_ReturnsContextErrorWhenCanceledDuringEmit(t *testing.T) {
 	}
 }
 
+func TestFetchItems_UsesConditionalHeadersAndHandlesNotModified(t *testing.T) {
+	feed := `<?xml version="1.0"?><rss><channel><item><guid>job-1</guid><title>Job 1</title><link>https://gengo.com/jobs/1</link></item></channel></rss>`
+
+	const etag = `W/"feed-v1"`
+	const lastModified = "Mon, 26 Feb 2026 10:00:00 GMT"
+
+	var secondReqIfNoneMatch string
+	var secondReqIfModifiedSince string
+	var hits atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch hits.Add(1) {
+		case 1:
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Last-Modified", lastModified)
+			_, _ = w.Write([]byte(feed))
+		case 2:
+			secondReqIfNoneMatch = r.Header.Get("If-None-Match")
+			secondReqIfModifiedSince = r.Header.Get("If-Modified-Since")
+			w.WriteHeader(http.StatusNotModified)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	m := New(config.RSSConfig{Enabled: true, URL: server.URL}, time.Hour, 0)
+
+	items, err := m.fetchItems(context.Background())
+	if err != nil {
+		t.Fatalf("first fetch failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected first fetch to return 1 item, got %d", len(items))
+	}
+
+	items, err = m.fetchItems(context.Background())
+	if err != nil {
+		t.Fatalf("second fetch should treat 304 as cache hit, got %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no items on 304 response, got %d", len(items))
+	}
+
+	if secondReqIfNoneMatch != etag {
+		t.Fatalf("expected If-None-Match=%q, got %q", etag, secondReqIfNoneMatch)
+	}
+	if secondReqIfModifiedSince != lastModified {
+		t.Fatalf("expected If-Modified-Since=%q, got %q", lastModified, secondReqIfModifiedSince)
+	}
+}
+
+func TestFetchItems_RefreshesConditionalValidatorsFrom304Response(t *testing.T) {
+	feed := `<?xml version="1.0"?><rss><channel><item><guid>job-1</guid><title>Job 1</title><link>https://gengo.com/jobs/1</link></item></channel></rss>`
+
+	const etagV1 = `W/"feed-v1"`
+	const etagV2 = `W/"feed-v2"`
+	const lastModifiedV1 = "Mon, 26 Feb 2026 10:00:00 GMT"
+	const lastModifiedV2 = "Mon, 26 Feb 2026 10:05:00 GMT"
+
+	var thirdReqIfNoneMatch string
+	var thirdReqIfModifiedSince string
+	var hits atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch hits.Add(1) {
+		case 1:
+			w.Header().Set("ETag", etagV1)
+			w.Header().Set("Last-Modified", lastModifiedV1)
+			_, _ = w.Write([]byte(feed))
+		case 2:
+			w.Header().Set("ETag", etagV2)
+			w.Header().Set("Last-Modified", lastModifiedV2)
+			w.WriteHeader(http.StatusNotModified)
+		case 3:
+			thirdReqIfNoneMatch = r.Header.Get("If-None-Match")
+			thirdReqIfModifiedSince = r.Header.Get("If-Modified-Since")
+			w.WriteHeader(http.StatusNotModified)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	m := New(config.RSSConfig{Enabled: true, URL: server.URL}, time.Hour, 0)
+
+	items, err := m.fetchItems(context.Background())
+	if err != nil {
+		t.Fatalf("first fetch failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected first fetch to return 1 item, got %d", len(items))
+	}
+
+	items, err = m.fetchItems(context.Background())
+	if err != nil {
+		t.Fatalf("second fetch should treat 304 as cache hit, got %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no items on second fetch, got %d", len(items))
+	}
+
+	items, err = m.fetchItems(context.Background())
+	if err != nil {
+		t.Fatalf("third fetch should treat 304 as cache hit, got %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no items on third fetch, got %d", len(items))
+	}
+
+	if thirdReqIfNoneMatch != etagV2 {
+		t.Fatalf("expected third request If-None-Match=%q, got %q", etagV2, thirdReqIfNoneMatch)
+	}
+	if thirdReqIfModifiedSince != lastModifiedV2 {
+		t.Fatalf("expected third request If-Modified-Since=%q, got %q", lastModifiedV2, thirdReqIfModifiedSince)
+	}
+}
+
 func TestEmitItems_SkipsNilFeedItem(t *testing.T) {
 	m := New(config.RSSConfig{Enabled: true, URL: "https://example.com/jobs.rss"}, time.Hour, 0)
 	events := make(chan gengo.JobEvent, 2)

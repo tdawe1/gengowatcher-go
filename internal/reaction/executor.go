@@ -1,21 +1,39 @@
 package reaction
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+const defaultMaxInFlight = 64
+
+var ErrAsyncBackpressure = errors.New("reaction async pool saturated")
 
 type Deps struct {
 	Open   func(context.Context, string) error
 	Notify func(context.Context, string) error
+
+	MaxInFlight int
 
 	OnAsyncError func(action string, err error)
 	OnAsyncPanic func(action string, recovered any)
 }
 
 type Executor struct {
-	deps Deps
+	deps  Deps
+	slots chan struct{}
 }
 
 func New(deps Deps) *Executor {
-	return &Executor{deps: deps}
+	maxInFlight := deps.MaxInFlight
+	if maxInFlight <= 0 {
+		maxInFlight = defaultMaxInFlight
+	}
+
+	return &Executor{
+		deps:  deps,
+		slots: make(chan struct{}, maxInFlight),
+	}
 }
 
 func (e *Executor) Dispatch(ctx context.Context, url string, title string) {
@@ -49,7 +67,18 @@ func (e *Executor) dispatchAsync(ctx context.Context, action string, run func(co
 		return
 	}
 
+	select {
+	case e.slots <- struct{}{}:
+	default:
+		e.reportError(action, ErrAsyncBackpressure)
+		return
+	}
+
 	go func() {
+		defer func() {
+			<-e.slots
+		}()
+
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				e.reportPanic(action, recovered)

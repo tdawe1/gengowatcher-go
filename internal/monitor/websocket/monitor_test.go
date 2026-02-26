@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -750,5 +752,41 @@ func TestStart_DoesNotEmitTimeoutWhileHeartbeatAlive(t *testing.T) {
 		case <-time.After(600 * time.Millisecond):
 			t.Fatal("timeout waiting for monitor to stop")
 		}
+	}
+}
+
+func TestApplyReconnectJitter_UsesConfiguredFraction(t *testing.T) {
+	m := New(config.WebSocketConfig{Enabled: true, URL: "wss://example.com"})
+	m.reconnectJitterFraction = 0.20
+
+	m.randFloat64 = func() float64 { return 0.0 }
+	if got := m.applyReconnectJitter(100 * time.Millisecond); got != 80*time.Millisecond {
+		t.Fatalf("expected min jittered backoff 80ms, got %s", got)
+	}
+
+	m.randFloat64 = func() float64 { return 1.0 }
+	if got := m.applyReconnectJitter(100 * time.Millisecond); got != 120*time.Millisecond {
+		t.Fatalf("expected max jittered backoff 120ms, got %s", got)
+	}
+}
+
+func TestApplyReconnectJitter_ReturnsBaseBackoffWhenDisabled(t *testing.T) {
+	m := New(config.WebSocketConfig{Enabled: true, URL: "wss://example.com"})
+	m.reconnectJitterFraction = 0
+
+	m.randFloat64 = func() float64 { return 0.95 }
+	if got := m.applyReconnectJitter(250 * time.Millisecond); got != 250*time.Millisecond {
+		t.Fatalf("expected base backoff when jitter disabled, got %s", got)
+	}
+}
+
+func TestNew_UsesInstanceRandomSourceForReconnectJitter(t *testing.T) {
+	m := New(config.WebSocketConfig{Enabled: true, URL: "wss://example.com"})
+	if m.randFloat64 == nil {
+		t.Fatal("expected randFloat64 to be initialized")
+	}
+
+	if reflect.ValueOf(m.randFloat64).Pointer() == reflect.ValueOf(rand.Float64).Pointer() {
+		t.Fatal("expected monitor to use instance RNG instead of global rand.Float64")
 	}
 }

@@ -41,6 +41,111 @@ func TestRouter_FirstSeenWinsAcrossSources(t *testing.T) {
 	}
 }
 
+func TestRouter_FirstSeenFallsBackToURLDerivedKeyWhenIDMissing(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	openCalls := make(chan struct{}, 2)
+	exec := reaction.New(reaction.Deps{
+		Open: func(context.Context, string) error {
+			openCalls <- struct{}{}
+			return nil
+		},
+	})
+
+	router := NewRouter(gate, exec, nil)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		Title: "First URL sighting",
+		URL:   "https://gengo.com/t/jobs/details/42?from=ws",
+	}))
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		Title: "Second URL sighting",
+		URL:   "https://gengo.com/jobs/42?from=rss",
+	}))
+
+	select {
+	case <-openCalls:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected one reaction dispatch")
+	}
+
+	select {
+	case <-openCalls:
+		t.Fatal("expected dedupe to suppress duplicate via url-derived key")
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestRouter_URLFallbackIncludesQueryWhenPathHasNoNumericID(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	openCalls := make(chan struct{}, 2)
+	exec := reaction.New(reaction.Deps{
+		Open: func(context.Context, string) error {
+			openCalls <- struct{}{}
+			return nil
+		},
+	})
+
+	router := NewRouter(gate, exec, nil)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		Title: "Query based 1",
+		URL:   "https://gengo.com/jobs?job_id=101",
+	}))
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		Title: "Query based 2",
+		URL:   "https://gengo.com/jobs?job_id=202",
+	}))
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-openCalls:
+		case <-time.After(1 * time.Second):
+			t.Fatalf("expected two distinct reaction dispatches, observed %d", i)
+		}
+	}
+}
+
+func TestRouter_FirstSeenFallsBackToFingerprintWhenIDAndURLMissing(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	openCalls := make(chan struct{}, 2)
+	exec := reaction.New(reaction.Deps{
+		Open: func(context.Context, string) error {
+			openCalls <- struct{}{}
+			return nil
+		},
+	})
+
+	router := NewRouter(gate, exec, nil)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		Title:     "EN -> JA product listing",
+		Language:  "en -> ja",
+		Reward:    7.25,
+		UnitCount: 180,
+	}))
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		Title:     "EN -> JA product listing",
+		Language:  "en -> ja",
+		Reward:    7.25,
+		UnitCount: 180,
+	}))
+
+	select {
+	case <-openCalls:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected one reaction dispatch")
+	}
+
+	select {
+	case <-openCalls:
+		t.Fatal("expected dedupe to suppress duplicate via fingerprint key")
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
 func TestRouter_TelemetryFailureDoesNotBlockDispatch(t *testing.T) {
 	gate := dedupe.New(time.Hour, 32)
 
@@ -117,7 +222,7 @@ func TestRouter_IgnoresNonJobFoundOrNilJobEvents(t *testing.T) {
 
 	router.Handle(context.Background(), gengo.NewErrorEvent(gengo.SourceRSS, "boom"))
 	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, nil))
-	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "", Title: "missing id"}))
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "", Title: ""}))
 	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobExpired, gengo.SourceWebSocket, &gengo.Job{ID: "job-expired"}))
 
 	select {
@@ -130,6 +235,135 @@ func TestRouter_IgnoresNonJobFoundOrNilJobEvents(t *testing.T) {
 	case <-telemetryCalls:
 		t.Fatal("expected no telemetry writes")
 	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestRouter_TelemetryFailureInvokesErrorHook(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	errorEvents := make(chan error, 1)
+	router := NewRouter(
+		gate,
+		nil,
+		telemetrySinkFunc(func(context.Context, TelemetryEvent) error {
+			return errors.New("write exploded")
+		}),
+		WithTelemetryErrorHook(func(err error) {
+			errorEvents <- err
+		}),
+	)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{ID: "job-88", URL: "https://gengo.com/jobs/88"}))
+
+	select {
+	case err := <-errorEvents:
+		if err == nil {
+			t.Fatal("expected telemetry error")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected telemetry error hook callback")
+	}
+}
+
+func TestRouter_TelemetryBackpressureReportsDrop(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	telemetryStarted := make(chan struct{}, 1)
+	releaseTelemetry := make(chan struct{})
+	errorEvents := make(chan error, 2)
+
+	router := NewRouter(
+		gate,
+		nil,
+		telemetrySinkFunc(func(context.Context, TelemetryEvent) error {
+			select {
+			case telemetryStarted <- struct{}{}:
+			default:
+			}
+
+			<-releaseTelemetry
+			return nil
+		}),
+		WithTelemetryMaxInFlight(1),
+		WithTelemetryErrorHook(func(err error) {
+			errorEvents <- err
+		}),
+	)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		ID:    "job-1",
+		URL:   "https://gengo.com/jobs/1",
+		Title: "first",
+	}))
+
+	select {
+	case <-telemetryStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected first telemetry write to start")
+	}
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		ID:    "job-2",
+		URL:   "https://gengo.com/jobs/2",
+		Title: "second",
+	}))
+
+	select {
+	case err := <-errorEvents:
+		if !errors.Is(err, ErrTelemetryBackpressure) {
+			t.Fatalf("expected backpressure error, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected telemetry backpressure callback")
+	}
+
+	close(releaseTelemetry)
+}
+
+func TestRouter_TelemetryWriteUsesBoundedContext(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	errorEvents := make(chan error, 1)
+	deadlineSet := make(chan bool, 1)
+
+	router := NewRouter(
+		gate,
+		nil,
+		telemetrySinkFunc(func(ctx context.Context, _ TelemetryEvent) error {
+			_, hasDeadline := ctx.Deadline()
+			deadlineSet <- hasDeadline
+
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+		WithTelemetryWriteTimeout(25*time.Millisecond),
+		WithTelemetryErrorHook(func(err error) {
+			errorEvents <- err
+		}),
+	)
+
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		ID:    "job-ctx-timeout",
+		URL:   "https://gengo.com/jobs/ctx-timeout",
+		Title: "ctx timeout",
+	}))
+
+	select {
+	case hasDeadline := <-deadlineSet:
+		if !hasDeadline {
+			t.Fatal("expected telemetry write context to include deadline")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected telemetry sink call")
+	}
+
+	select {
+	case err := <-errorEvents:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected context deadline exceeded, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected telemetry timeout error callback")
 	}
 }
 

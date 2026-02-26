@@ -137,3 +137,46 @@ func TestExecutor_DispatchReportsAsyncErrors(t *testing.T) {
 		t.Fatalf("missing notify error callback: %#v", seen)
 	}
 }
+
+func TestExecutor_DispatchReportsBackpressureWhenPoolIsSaturated(t *testing.T) {
+	releaseOpen := make(chan struct{})
+	openStarted := make(chan struct{}, 1)
+	errorEvents := make(chan string, 2)
+
+	exec := New(Deps{
+		MaxInFlight: 1,
+		Open: func(context.Context, string) error {
+			openStarted <- struct{}{}
+			<-releaseOpen
+			return nil
+		},
+		Notify: func(context.Context, string) error {
+			return nil
+		},
+		OnAsyncError: func(action string, err error) {
+			if err == nil {
+				return
+			}
+			errorEvents <- action + ":" + err.Error()
+		},
+	})
+
+	exec.Dispatch(context.Background(), "https://gengo.com/t/jobs/details/1", "job")
+
+	select {
+	case <-openStarted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expected open action to start")
+	}
+
+	select {
+	case msg := <-errorEvents:
+		if msg != "notify:"+ErrAsyncBackpressure.Error() {
+			t.Fatalf("unexpected backpressure error callback: %s", msg)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("expected backpressure error callback for notify action")
+	}
+
+	close(releaseOpen)
+}
