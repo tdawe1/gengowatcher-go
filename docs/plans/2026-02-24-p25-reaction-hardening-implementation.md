@@ -8,6 +8,19 @@
 
 **Tech Stack:** Go 1.24, `github.com/gorilla/websocket`, `database/sql`, `modernc.org/sqlite`, table-driven tests, `httptest`.
 
+## Execution Status (Updated 2026-02-26)
+
+- Tasks 1-8 in this plan are completed and merged into local `main`.
+- Follow-up reliability fixes from code review are also completed:
+  - telemetry write timeout + cancellation propagation in router,
+  - bounded watcher shutdown wait when monitors misbehave,
+  - per-monitor WebSocket reconnect jitter RNG,
+  - query-sensitive URL fallback dedupe key handling,
+  - RSS validator refresh on `304 Not Modified`.
+- Verification gate passed:
+  - `go test ./internal/app ./internal/pipeline ./internal/monitor/websocket ./internal/monitor/rss ./internal/reaction -v`
+  - `go test ./...`
+
 ---
 
 Use these implementation skills while executing:
@@ -465,3 +478,20 @@ Expected: Only intended files are modified.
 git add go-rewrite-plan.md
 git commit -m "docs: record p25 rss ws reaction hardening progress"
 ```
+
+---
+
+## Post-Plan Review Follow-Ups (Completed)
+
+These were identified during code review after initial Task 1-8 execution and are now complete:
+
+1. **Router telemetry cancellation safety**
+   - Added bounded write context timeout and parent cancellation propagation.
+2. **Watcher shutdown boundedness**
+   - Added shutdown timeout guard so `Start` cannot block forever waiting for monitor goroutines.
+3. **Reconnect jitter RNG isolation**
+   - Replaced global RNG usage with monitor-instance RNG function.
+4. **URL fallback dedupe precision**
+   - Included normalized query in URL-derived fallback key when no numeric path ID exists.
+5. **RSS conditional validator refresh**
+   - Refreshes cached `ETag` and `Last-Modified` values from `304` responses.
