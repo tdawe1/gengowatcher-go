@@ -10,7 +10,7 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
 
 ## Current Status (Important)
 
-- Phase 2.5 hardening has been implemented.
+- Phase 2.5 hardening plus reliability follow-ups are implemented.
 - Tests are currently green with `go test ./...`.
 - Source-of-truth status is tracked in `docs/project-status.md`.
 
@@ -41,15 +41,15 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
 - `internal/telemetry/sqlite`
   - SQLite sink for event telemetry and rolling latency view.
 - `internal/pipeline`
-  - Router: first-seen check + reaction dispatch + async telemetry write.
+  - Router: canonical first-seen keying (`id -> url -> fingerprint`) + reaction dispatch + bounded telemetry write.
 
 ## Known Gaps / Next Priority
 
-Before deep Phase 3 work, prioritize:
+Must-fix reliability items are complete. Next priorities:
 
-1. Canonical dedupe key fallback in router (`job.id -> URL key -> fingerprint`).
-2. Bounded async execution/backpressure for reaction + telemetry.
-3. Visibility for telemetry sink write failures (log/hook/metric).
+1. Start Phase 3 TUI implementation (jobs/stats/logs baseline).
+2. Improve telemetry aggregates toward p50/p90/p99 and source asymmetry visibility.
+3. Keep runtime cancellation and backpressure guarantees intact while integrating Phase 3 UI paths.
 
 See `docs/project-status.md` for latest callouts.
 

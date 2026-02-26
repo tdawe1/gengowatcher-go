@@ -40,6 +40,7 @@ Last updated: 2026-02-26
 
 ## Update Log
 
+- 2026-02-26: Completed second-pass review follow-ups (telemetry cancellation timeout, bounded watcher shutdown, instance jitter RNG, query-sensitive URL fallback dedupe, RSS 304 validator refresh) and validated merge readiness.
 - 2026-02-26: Wired runtime monitor-router-reaction-telemetry flow and implemented recommended reconnect jitter plus RSS conditional polling headers.
 - 2026-02-26: Completed pre-Phase 3 must-fix follow-ups (canonical dedupe fallback, bounded async backpressure, telemetry error surfacing) and marked Phase 3 as unblocked.
 - 2026-02-24: Created project status baseline; recorded completed Phase 2.5 hardening scope, review outcome, and pre-Phase 3 must-fix items.
