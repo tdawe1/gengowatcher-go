@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"log"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,6 +12,12 @@ import (
 )
 
 const tuiEventBuffer = 128
+
+var watcherJoinTimeout = 2 * time.Second
+
+var reportDroppedEvent = func(ev gengo.JobEvent) {
+	log.Printf("ui event dropped: source=%s type=%s", ev.Source, ev.Type)
+}
 
 type watcherRunner interface {
 	Start(context.Context) error
@@ -67,6 +74,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			select {
 			case events <- ev:
 			default:
+				reportDroppedEvent(ev)
 			}
 		},
 	})
@@ -102,10 +110,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		if err == nil && werr != nil {
 			return werr
 		}
-	case <-time.After(2 * time.Second):
-		if err == nil {
-			return context.DeadlineExceeded
-		}
+	case <-time.After(watcherJoinTimeout):
 	}
 
 	return err

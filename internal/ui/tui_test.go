@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,6 +229,89 @@ func TestRun_PropagatesWatcherFatalError(t *testing.T) {
 	err := Run(context.Background(), &config.Config{})
 	if !errors.Is(err, fatalErr) {
 		t.Fatalf("expected watcher fatal error, got %v", err)
+	}
+}
+
+func TestRun_ReportsDroppedEventsWhenBufferSaturated(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevReportDrop := reportDroppedEvent
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		reportDroppedEvent = prevReportDrop
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watcher := &stubWatcher{started: make(chan struct{}, 1)}
+	var onJobFound func(gengo.JobEvent)
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		onJobFound = deps.OnJobFound
+		return watcher, nil
+	}
+
+	var drops atomic.Int32
+	reportDroppedEvent = func(gengo.JobEvent) {
+		drops.Add(1)
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			if onJobFound == nil {
+				t.Fatal("expected OnJobFound callback to be set")
+			}
+
+			ev := gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "job-drop", Title: "drop"})
+			for i := range tuiEventBuffer + 64 {
+				onJobFound(gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: ev.Job.ID, Title: ev.Job.Title, Reward: float64(i)}))
+			}
+
+			cancel()
+			return model, nil
+		}}
+	}
+
+	err := Run(ctx, &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if drops.Load() == 0 {
+		t.Fatal("expected dropped event reports when buffer saturates")
+	}
+}
+
+func TestRun_DoesNotReturnDeadlineExceededOnCleanQuit(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevJoinTimeout := watcherJoinTimeout
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		watcherJoinTimeout = prevJoinTimeout
+	})
+
+	watcherJoinTimeout = 20 * time.Millisecond
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			time.Sleep(60 * time.Millisecond)
+			return nil
+		}), nil
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			return model, nil
+		}}
+	}
+
+	err := Run(context.Background(), &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error on clean quit, got %v", err)
 	}
 }
 
