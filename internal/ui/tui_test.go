@@ -235,11 +235,11 @@ func TestRun_PropagatesWatcherFatalError(t *testing.T) {
 func TestRun_ReportsDroppedEventsWhenBufferSaturated(t *testing.T) {
 	prevNewWatcher := newWatcher
 	prevNewTeaProgram := newTeaProgram
-	prevReportDrop := reportDroppedEvent
+	prevReportDrop := reportDroppedEvents
 	t.Cleanup(func() {
 		newWatcher = prevNewWatcher
 		newTeaProgram = prevNewTeaProgram
-		reportDroppedEvent = prevReportDrop
+		reportDroppedEvents = prevReportDrop
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -253,9 +253,11 @@ func TestRun_ReportsDroppedEventsWhenBufferSaturated(t *testing.T) {
 		return watcher, nil
 	}
 
-	var drops atomic.Int32
-	reportDroppedEvent = func(gengo.JobEvent) {
-		drops.Add(1)
+	var reportedDrops atomic.Uint64
+	var reportCalls atomic.Int32
+	reportDroppedEvents = func(count uint64) {
+		reportCalls.Add(1)
+		reportedDrops.Add(count)
 	}
 
 	newTeaProgram = func(model tea.Model) teaProgramRunner {
@@ -278,8 +280,292 @@ func TestRun_ReportsDroppedEventsWhenBufferSaturated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if drops.Load() == 0 {
+	expectedDrops := 64
+	if reportedDrops.Load() == 0 {
 		t.Fatal("expected dropped event reports when buffer saturates")
+	}
+	if calls := reportCalls.Load(); calls >= int32(expectedDrops) {
+		t.Fatalf("expected aggregated drop reporting, got calls=%d drops=%d", calls, expectedDrops)
+	}
+}
+
+func TestRun_ReportsWatcherJoinTimeout(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevJoinTimeout := watcherJoinTimeout
+	prevReportJoinTimeout := reportWatcherJoinTimeout
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		watcherJoinTimeout = prevJoinTimeout
+		reportWatcherJoinTimeout = prevReportJoinTimeout
+	})
+
+	watcherJoinTimeout = 20 * time.Millisecond
+	releaseWatcher := make(chan struct{})
+	defer close(releaseWatcher)
+
+	var timeoutReports atomic.Int32
+	reportWatcherJoinTimeout = func(timeout time.Duration) {
+		if timeout != watcherJoinTimeout {
+			t.Fatalf("expected timeout report to use watcherJoinTimeout, got %s", timeout)
+		}
+		timeoutReports.Add(1)
+	}
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			<-releaseWatcher
+			return nil
+		}), nil
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			return model, nil
+		}}
+	}
+
+	err := Run(context.Background(), &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error on join timeout, got %v", err)
+	}
+	if timeoutReports.Load() != 1 {
+		t.Fatalf("expected one timeout report, got %d", timeoutReports.Load())
+	}
+}
+
+func TestRun_AggregatesDropReportsUnderBurst(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevReportDrop := reportDroppedEvents
+	prevDropInterval := droppedEventReportInterval
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		reportDroppedEvents = prevReportDrop
+		droppedEventReportInterval = prevDropInterval
+	})
+
+	droppedEventReportInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watcher := &stubWatcher{started: make(chan struct{}, 1)}
+	var onJobFound func(gengo.JobEvent)
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		onJobFound = deps.OnJobFound
+		return watcher, nil
+	}
+
+	var reportCalls atomic.Int32
+	var reportedDrops atomic.Uint64
+	reportDroppedEvents = func(count uint64) {
+		reportCalls.Add(1)
+		reportedDrops.Add(count)
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			if onJobFound == nil {
+				t.Fatal("expected OnJobFound callback to be set")
+			}
+
+			totalEvents := tuiEventBuffer + 64
+			for i := range totalEvents {
+				onJobFound(gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "job-burst", Title: "burst", Reward: float64(i)}))
+			}
+
+			cancel()
+
+			return model, nil
+		}}
+	}
+
+	err := Run(ctx, &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	totalEvents := tuiEventBuffer + 64
+	expectedDrops := totalEvents - tuiEventBuffer
+	if got := int(reportedDrops.Load()); got != expectedDrops {
+		t.Fatalf("expected aggregated drop reports to equal drops, got=%d expected=%d", got, expectedDrops)
+	}
+	if calls := reportCalls.Load(); calls >= int32(expectedDrops) {
+		t.Fatalf("expected aggregated reporting, got per-drop behavior with %d calls", calls)
+	}
+}
+
+func TestRun_ReportsDropsThatHappenAfterCancel(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevReportDrop := reportDroppedEvents
+	prevDropInterval := droppedEventReportInterval
+	prevJoinTimeout := watcherJoinTimeout
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		reportDroppedEvents = prevReportDrop
+		droppedEventReportInterval = prevDropInterval
+		watcherJoinTimeout = prevJoinTimeout
+	})
+
+	droppedEventReportInterval = time.Hour
+	watcherJoinTimeout = 250 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var onJobFound func(gengo.JobEvent)
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		onJobFound = deps.OnJobFound
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			time.Sleep(25 * time.Millisecond)
+			for i := range tuiEventBuffer + 32 {
+				onJobFound(gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "job-late-drop", Title: "late drop", Reward: float64(i)}))
+			}
+			return nil
+		}), nil
+	}
+
+	var reportedDrops atomic.Uint64
+	var reportCalls atomic.Int32
+	reportDroppedEvents = func(count uint64) {
+		reportCalls.Add(1)
+		reportedDrops.Add(count)
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			return model, nil
+		}}
+	}
+
+	err := Run(ctx, &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if reportedDrops.Load() == 0 {
+		t.Fatal("expected drop reports for post-cancel drops")
+	}
+}
+
+func TestRun_ReportsDropsThatHappenAfterJoinTimeout(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevReportDrop := reportDroppedEvents
+	prevDropInterval := droppedEventReportInterval
+	prevJoinTimeout := watcherJoinTimeout
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		reportDroppedEvents = prevReportDrop
+		droppedEventReportInterval = prevDropInterval
+		watcherJoinTimeout = prevJoinTimeout
+	})
+
+	droppedEventReportInterval = time.Hour
+	watcherJoinTimeout = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var onJobFound func(gengo.JobEvent)
+	dropsEmitted := make(chan struct{})
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		onJobFound = deps.OnJobFound
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			time.Sleep(40 * time.Millisecond)
+			for i := range tuiEventBuffer + 32 {
+				onJobFound(gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{ID: "job-timeout-drop", Title: "timeout drop", Reward: float64(i)}))
+			}
+			close(dropsEmitted)
+			return nil
+		}), nil
+	}
+
+	var reportedDrops atomic.Uint64
+	var reportCalls atomic.Int32
+	reportDroppedEvents = func(count uint64) {
+		reportCalls.Add(1)
+		reportedDrops.Add(count)
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			return model, nil
+		}}
+	}
+
+	err := Run(ctx, &config.Config{})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	select {
+	case <-dropsEmitted:
+	case <-time.After(time.Second):
+		t.Fatal("expected watcher to emit post-timeout drops")
+	}
+
+	if reportedDrops.Load() == 0 {
+		t.Fatal("expected drop reports for post-timeout drops")
+	}
+	if calls := reportCalls.Load(); calls >= int32(reportedDrops.Load()) {
+		t.Fatalf("expected aggregated post-timeout reporting, got calls=%d drops=%d", calls, reportedDrops.Load())
+	}
+}
+
+func TestRun_PropagatesWatcherErrorDuringPostTimeoutDrain(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	prevJoinTimeout := watcherJoinTimeout
+	prevDrainWindow := watcherPostTimeoutDrainWindow
+	prevReportJoinTimeout := reportWatcherJoinTimeout
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+		watcherJoinTimeout = prevJoinTimeout
+		watcherPostTimeoutDrainWindow = prevDrainWindow
+		reportWatcherJoinTimeout = prevReportJoinTimeout
+	})
+
+	watcherJoinTimeout = 20 * time.Millisecond
+	watcherPostTimeoutDrainWindow = 100 * time.Millisecond
+
+	lateWatcherErr := errors.New("late watcher fatal")
+	timeoutReported := make(chan struct{}, 1)
+	reportWatcherJoinTimeout = func(time.Duration) {
+		select {
+		case timeoutReported <- struct{}{}:
+		default:
+		}
+	}
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			<-timeoutReported
+			return lateWatcherErr
+		}), nil
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			return model, nil
+		}}
+	}
+
+	err := Run(context.Background(), &config.Config{})
+	if !errors.Is(err, lateWatcherErr) {
+		t.Fatalf("expected late watcher error during drain, got %v", err)
 	}
 }
 

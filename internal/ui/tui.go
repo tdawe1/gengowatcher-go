@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"log"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,9 +15,16 @@ import (
 const tuiEventBuffer = 128
 
 var watcherJoinTimeout = 2 * time.Second
+var watcherPostTimeoutDrainWindow = 100 * time.Millisecond
 
-var reportDroppedEvent = func(ev gengo.JobEvent) {
-	log.Printf("ui event dropped: source=%s type=%s", ev.Source, ev.Type)
+var droppedEventReportInterval = 250 * time.Millisecond
+
+var reportDroppedEvents = func(count uint64) {
+	log.Printf("ui events dropped: count=%d", count)
+}
+
+var reportWatcherJoinTimeout = func(timeout time.Duration) {
+	log.Printf("watcher shutdown exceeded join timeout: timeout=%s", timeout)
 }
 
 type watcherRunner interface {
@@ -68,19 +76,49 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	defer cancel()
 
 	events := make(chan gengo.JobEvent, tuiEventBuffer)
+	var droppedEvents atomic.Uint64
 
 	watcher, err := newWatcher(cfg, app.Deps{
 		OnJobFound: func(ev gengo.JobEvent) {
 			select {
 			case events <- ev:
 			default:
-				reportDroppedEvent(ev)
+				droppedEvents.Add(1)
 			}
 		},
 	})
 	if err != nil {
 		return err
 	}
+
+	interval := droppedEventReportInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	dropReporterDone := make(chan struct{})
+	stopDropReporter := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer close(dropReporterDone)
+
+		reportDrops := func() {
+			if dropped := droppedEvents.Swap(0); dropped > 0 {
+				reportDroppedEvents(dropped)
+			}
+		}
+
+		for {
+			select {
+			case <-stopDropReporter:
+				reportDrops()
+				return
+			case <-ticker.C:
+				reportDrops()
+			}
+		}
+	}()
 
 	model := NewModel()
 	model.events = events
@@ -105,13 +143,37 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	_, err = program.Run()
 	cancel()
 
+	joinTimer := time.NewTimer(watcherJoinTimeout)
+	defer joinTimer.Stop()
+
 	select {
 	case werr := <-watcherErr:
 		if err == nil && werr != nil {
+			close(stopDropReporter)
+			<-dropReporterDone
 			return werr
 		}
-	case <-time.After(watcherJoinTimeout):
+	case <-joinTimer.C:
+		reportWatcherJoinTimeout(watcherJoinTimeout)
+
+		drainWindow := watcherPostTimeoutDrainWindow
+		if drainWindow > 0 {
+			drainTimer := time.NewTimer(drainWindow)
+			select {
+			case werr := <-watcherErr:
+				if err == nil && werr != nil {
+					close(stopDropReporter)
+					<-dropReporterDone
+					return werr
+				}
+			case <-drainTimer.C:
+			}
+			drainTimer.Stop()
+		}
 	}
+
+	close(stopDropReporter)
+	<-dropReporterDone
 
 	return err
 }
