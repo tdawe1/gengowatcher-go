@@ -6,11 +6,11 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
 
 - Go rewrite of GengoWatcher focused on monitor parity and composable API.
 - Public contract lives in `pkg/gengo`.
-- Current implementation focus is low-latency RSS + WebSocket ingestion hardening.
+- Current implementation focus is Phase 3 TUI baseline on top of hardened RSS/WebSocket ingestion.
 
 ## Current Status (Important)
 
-- Phase 2.5 hardening plus reliability follow-ups are implemented.
+- Phase 2.5 hardening is complete; Phase 3 baseline is in progress.
 - Tests are currently green with `go test ./...`.
 - Source-of-truth status is tracked in `docs/project-status.md`.
 
@@ -42,14 +42,19 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
   - SQLite sink for event telemetry and rolling latency view.
 - `internal/pipeline`
   - Router: canonical first-seen keying (`id -> url -> fingerprint`) + reaction dispatch + bounded telemetry write.
+- `internal/ui`
+  - Bubble Tea baseline model with Jobs + Stats tabs and live first-seen event updates.
+- `cmd/gengowatcher`
+  - CLI entrypoint that loads config, validates monitors, and launches TUI runtime.
 
 ## Known Gaps / Next Priority
 
 Must-fix reliability items are complete. Next priorities:
 
-1. Start Phase 3 TUI implementation (jobs/stats/logs baseline).
+1. Keep command input + log viewer deferred until post-baseline phase work (with richer status bar polish).
 2. Improve telemetry aggregates toward p50/p90/p99 and source asymmetry visibility.
-3. Keep runtime cancellation and backpressure guarantees intact while integrating Phase 3 UI paths.
+3. Keep runtime cancellation and backpressure guarantees intact while expanding UI/event throughput.
+4. Keep state persistence + notifications deferred until after baseline UI scope is stable.
 
 See `docs/project-status.md` for latest callouts.
 

@@ -26,6 +26,7 @@ const (
 
 var ErrNoEnabledMonitors = errors.New("no enabled monitors configured")
 var ErrShutdownTimeout = errors.New("watcher shutdown wait timed out")
+var ErrEventsChannelClosed = errors.New("watcher events channel closed")
 
 type Deps struct {
 	Monitors []gengo.Monitor
@@ -33,8 +34,11 @@ type Deps struct {
 	Open   func(context.Context, string) error
 	Notify func(context.Context, string) error
 
-	TelemetrySink     pipeline.TelemetrySink
-	OnTelemetryError  func(error)
+	TelemetrySink    pipeline.TelemetrySink
+	OnTelemetryError func(error)
+	// OnJobFound runs synchronously on the watcher/router hot path for first-seen
+	// jobs. It MUST return quickly and be non-blocking.
+	OnJobFound        func(gengo.JobEvent)
 	OnReactionError   func(action string, err error)
 	OnReactionPanic   func(action string, recovered any)
 	ReactionInFlight  int
@@ -93,6 +97,7 @@ func NewWatcher(cfg *config.Config, deps Deps) (*Watcher, error) {
 		dedupe.New(dedupeTTL, dedupeCap),
 		reactionExec,
 		deps.TelemetrySink,
+		pipeline.WithOnFirstSeenJob(deps.OnJobFound),
 		pipeline.WithTelemetryMaxInFlight(telemetryInFlight),
 		pipeline.WithTelemetryErrorHook(deps.OnTelemetryError),
 	)
@@ -172,7 +177,10 @@ func (w *Watcher) Start(ctx context.Context) error {
 			if err != nil {
 				return w.finishShutdown(cancel, stopped, err)
 			}
-		case ev := <-events:
+		case ev, ok := <-events:
+			if !ok {
+				return w.finishShutdown(cancel, stopped, ErrEventsChannelClosed)
+			}
 			w.router.Handle(runCtx, ev)
 		}
 	}

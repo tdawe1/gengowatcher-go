@@ -4,7 +4,7 @@ Last updated: 2026-02-26
 
 ## Current Phase
 
-- Phase 2.5 hardening follow-ups plus runtime pipeline wiring are implemented.
+- Phase 3 baseline is in progress (Jobs+Stats TUI + CLI launch path).
 - Full test suite is passing (`go test ./...`).
 - Work is on `main` with a focused commit series for each task area.
 
@@ -26,20 +26,32 @@ Last updated: 2026-02-26
 
 ## Review Outcome
 
-- Status: ready for Phase 3 kickoff, with non-blocking telemetry aggregate improvements remaining.
+- Status: Phase 3 baseline is in progress, with non-blocking telemetry aggregate improvements remaining.
 - Security posture: no critical injection/XSS-style findings in this scope.
 
 ## Must-Fix Before Phase 3
 
 - All must-fix items are now completed.
-- Phase 3 can start once non-blocking recommendations are prioritized.
+- Phase 3 is active; non-blocking recommendations are tracked for follow-up.
+
+## Verification Evidence
+
+- Focused suites passed:
+  - `go test ./internal/ui ./internal/app ./internal/pipeline ./internal/monitor/rss ./internal/monitor/websocket ./internal/reaction -v`
+- CLI suite passed:
+  - `go test ./cmd/gengowatcher -v`
+- Full suite passed:
+  - `go test ./...`
 
 ## Recommended (Non-Blocking)
 
 - Improve telemetry aggregates toward p50/p90/p99 and source asymmetry tracking.
+- Keep command-input and log-viewer deferred until post-baseline phase work (alongside richer status-bar polish).
+- Keep state persistence + notifications deferred to the post-baseline phase so Phase 3 stays focused on stable live UI ingestion.
 
 ## Update Log
 
+- 2026-02-26: Started Phase 3 baseline implementation (router first-seen UI hook, watcher OnJobFound callback, Bubble Tea Jobs/Stats model, TUI runtime bridge, CLI entrypoint).
 - 2026-02-26: Completed second-pass review follow-ups (telemetry cancellation timeout, bounded watcher shutdown, instance jitter RNG, query-sensitive URL fallback dedupe, RSS 304 validator refresh) and validated merge readiness.
 - 2026-02-26: Wired runtime monitor-router-reaction-telemetry flow and implemented recommended reconnect jitter plus RSS conditional polling headers.
 - 2026-02-26: Completed pre-Phase 3 must-fix follow-ups (canonical dedupe fallback, bounded async backpressure, telemetry error surfacing) and marked Phase 3 as unblocked.

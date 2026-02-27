@@ -41,6 +41,84 @@ func TestRouter_FirstSeenWinsAcrossSources(t *testing.T) {
 	}
 }
 
+func TestRouter_FirstSeenHookRunsOnceForDuplicates(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+	hookCalls := make(chan gengo.JobEvent, 2)
+
+	router := NewRouter(
+		gate,
+		nil,
+		nil,
+		WithOnFirstSeenJob(func(ev gengo.JobEvent) {
+			hookCalls <- ev
+		}),
+	)
+
+	job := &gengo.Job{ID: "job-42", URL: "https://gengo.com/jobs/42"}
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, job))
+	router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, job))
+
+	select {
+	case <-hookCalls:
+	case <-time.After(time.Second):
+		t.Fatal("expected first-seen hook call")
+	}
+
+	select {
+	case <-hookCalls:
+		t.Fatal("expected duplicate suppression for first-seen hook")
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+func TestRouter_FirstSeenHookPanicDoesNotBreakDispatch(t *testing.T) {
+	gate := dedupe.New(time.Hour, 32)
+
+	openCalls := make(chan struct{}, 1)
+	exec := reaction.New(reaction.Deps{
+		Open: func(context.Context, string) error {
+			openCalls <- struct{}{}
+			return nil
+		},
+	})
+
+	router := NewRouter(
+		gate,
+		exec,
+		nil,
+		WithOnFirstSeenJob(func(gengo.JobEvent) {
+			panic("hook exploded")
+		}),
+	)
+
+	panicValue := make(chan any, 1)
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				panicValue <- recovered
+			}
+		}()
+
+		router.Handle(context.Background(), gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+			ID:    "job-panic",
+			Title: "panic-safe dispatch",
+			URL:   "https://gengo.com/jobs/panic",
+		}))
+	}()
+
+	select {
+	case recovered := <-panicValue:
+		t.Fatalf("expected first-seen hook panic to be recovered by router, got %v", recovered)
+	default:
+	}
+
+	select {
+	case <-openCalls:
+	case <-time.After(1 * time.Second):
+		t.Fatal("expected reaction dispatch even when first-seen hook panics")
+	}
+}
+
 func TestRouter_FirstSeenFallsBackToURLDerivedKeyWhenIDMissing(t *testing.T) {
 	gate := dedupe.New(time.Hour, 32)
 

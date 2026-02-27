@@ -78,6 +78,131 @@ func TestWatcher_StartRoutesMonitorEventsToReactionAndTelemetry(t *testing.T) {
 	}
 }
 
+func TestWatcher_StartCallsOnJobFoundForFirstSeenEvents(t *testing.T) {
+	jobA := gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceWebSocket, &gengo.Job{
+		ID:  "job-1",
+		URL: "https://gengo.com/jobs/1",
+	})
+	jobADupe := gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		ID:  "job-1",
+		URL: "https://gengo.com/jobs/1",
+	})
+
+	jobCalls := make(chan gengo.JobEvent, 2)
+	sentAll := make(chan struct{})
+	w, err := NewWatcher(&config.Config{}, Deps{
+		Monitors: []gengo.Monitor{
+			stubMonitor{
+				name:    "m",
+				source:  gengo.SourceWebSocket,
+				enabled: true,
+				events:  []gengo.JobEvent{jobA, jobADupe},
+				sentAll: sentAll,
+			},
+		},
+		OnJobFound: func(ev gengo.JobEvent) {
+			jobCalls <- ev
+		},
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Start(ctx)
+	}()
+
+	select {
+	case ev := <-jobCalls:
+		if ev.Job == nil {
+			t.Fatal("expected callback payload with job")
+		}
+		if ev.Job.ID != "job-1" {
+			t.Fatalf("expected callback job id job-1, got %q", ev.Job.ID)
+		}
+		if ev.Source != gengo.SourceWebSocket {
+			t.Fatalf("expected callback source %q, got %q", gengo.SourceWebSocket, ev.Source)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected first-seen callback")
+	}
+
+	select {
+	case <-sentAll:
+	case <-time.After(time.Second):
+		t.Fatal("expected monitor to emit all test events")
+	}
+
+	select {
+	case <-jobCalls:
+		t.Fatal("expected duplicate suppression for watcher callback")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("expected nil start error on cancel, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected watcher Start to stop after cancel")
+	}
+
+}
+
+func TestWatcher_StartRecoversOnJobFoundPanic(t *testing.T) {
+	jobEvent := gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+		ID:  "job-panic",
+		URL: "https://gengo.com/jobs/panic",
+	})
+
+	callbackCalled := make(chan struct{}, 1)
+	w, err := NewWatcher(&config.Config{}, Deps{
+		Monitors: []gengo.Monitor{
+			stubMonitor{
+				name:    "panic-hook",
+				source:  gengo.SourceRSS,
+				enabled: true,
+				events:  []gengo.JobEvent{jobEvent},
+			},
+		},
+		OnJobFound: func(gengo.JobEvent) {
+			callbackCalled <- struct{}{}
+			panic("boom")
+		},
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- w.Start(ctx)
+	}()
+
+	select {
+	case <-callbackCalled:
+	case <-time.After(time.Second):
+		t.Fatal("expected OnJobFound callback to run")
+	}
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("expected nil start error after callback panic recovery, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected watcher Start to stop after cancel")
+	}
+}
+
 func TestWatcher_StartReturnsFatalMonitorError(t *testing.T) {
 	fatalErr := errors.New("fatal monitor failure")
 
@@ -149,11 +274,34 @@ func TestWatcher_StartReturnsFatalErrorWithoutHangingOnStuckMonitor(t *testing.T
 	}
 }
 
+func TestWatcher_StartReturnsWhenEventsChannelCloses(t *testing.T) {
+	w, err := NewWatcher(&config.Config{}, Deps{
+		Monitors: []gengo.Monitor{
+			stubMonitor{
+				name:        "closer",
+				source:      gengo.SourceRSS,
+				enabled:     true,
+				closeEvents: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new watcher: %v", err)
+	}
+
+	err = w.Start(context.Background())
+	if !errors.Is(err, ErrEventsChannelClosed) {
+		t.Fatalf("expected ErrEventsChannelClosed, got %v", err)
+	}
+}
+
 type stubMonitor struct {
 	name         string
 	source       gengo.Source
 	enabled      bool
 	events       []gengo.JobEvent
+	sentAll      chan struct{}
+	closeEvents  bool
 	startErr     error
 	ignoreCancel bool
 	blockUntil   chan struct{}
@@ -162,6 +310,11 @@ type stubMonitor struct {
 func (m stubMonitor) Start(ctx context.Context, events chan<- gengo.JobEvent) error {
 	if m.startErr != nil {
 		return m.startErr
+	}
+
+	if m.closeEvents {
+		close(events)
+		return nil
 	}
 
 	if m.blockUntil != nil {
@@ -184,6 +337,10 @@ func (m stubMonitor) Start(ctx context.Context, events chan<- gengo.JobEvent) er
 		case <-ctx.Done():
 			return nil
 		}
+	}
+
+	if m.sentAll != nil {
+		close(m.sentAll)
 	}
 
 	<-ctx.Done()

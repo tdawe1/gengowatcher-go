@@ -44,6 +44,7 @@ type Router struct {
 	telemetryWriteTimeout time.Duration
 	telemetrySlots        chan struct{}
 	onTelemetryError      func(error)
+	onFirstSeenJob        func(gengo.JobEvent)
 }
 
 func WithTelemetryMaxInFlight(maxInFlight int) RouterOption {
@@ -73,6 +74,21 @@ func WithTelemetryWriteTimeout(timeout time.Duration) RouterOption {
 		}
 
 		r.telemetryWriteTimeout = timeout
+	}
+}
+
+// WithOnFirstSeenJob registers a callback for first-seen jobs during Handle.
+//
+// The callback executes synchronously on the router hot path, so it must be
+// non-blocking. Panics are recovered to prevent hook failures from breaking
+// reaction dispatch.
+func WithOnFirstSeenJob(fn func(gengo.JobEvent)) RouterOption {
+	return func(r *Router) {
+		if r == nil {
+			return
+		}
+
+		r.onFirstSeenJob = fn
 	}
 }
 
@@ -121,6 +137,8 @@ func (r *Router) Handle(ctx context.Context, ev gengo.JobEvent) {
 		return
 	}
 
+	r.runFirstSeenHook(ev)
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -132,6 +150,18 @@ func (r *Router) Handle(ctx context.Context, ev gengo.JobEvent) {
 	if r.telemetry != nil {
 		r.writeTelemetryAsync(ctx, ev, jobKey)
 	}
+}
+
+func (r *Router) runFirstSeenHook(ev gengo.JobEvent) {
+	if r == nil || r.onFirstSeenJob == nil {
+		return
+	}
+
+	defer func() {
+		_ = recover()
+	}()
+
+	r.onFirstSeenJob(ev)
 }
 
 func (r *Router) firstSeen(jobID string) bool {
