@@ -34,7 +34,8 @@ See `go-rewrite-plan.md` for full design and roadmap.
   - bounded telemetry writes with error hooks.
 - Bubble Tea baseline UI in `internal/ui` with:
   - Jobs and Stats tabs,
-  - live first-seen job updates from watcher runtime.
+  - live first-seen job updates from watcher runtime,
+  - aggregated dropped-event telemetry and join-timeout observability for the TUI event bridge.
 - CLI entrypoint in `cmd/gengowatcher`:
   - config loading/validation,
   - monitor enablement guard,

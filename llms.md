@@ -11,7 +11,7 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
 ## Current Status (Important)
 
 - Phase 2.5 hardening is complete; Phase 3 baseline is in progress.
-- Tests are currently green with `go test ./...`.
+- Latest TUI runtime reliability hardening is in place and validated with `go test -count=1 ./internal/ui`.
 - Source-of-truth status is tracked in `docs/project-status.md`.
 
 ## Core Contracts
@@ -44,6 +44,7 @@ This file is the quick-start context for LLM agents working in `gengowatcher-go`
   - Router: canonical first-seen keying (`id -> url -> fingerprint`) + reaction dispatch + bounded telemetry write.
 - `internal/ui`
   - Bubble Tea baseline model with Jobs + Stats tabs and live first-seen event updates.
+  - Runtime bridge now uses aggregated dropped-event telemetry plus join-timeout observability and bounded post-timeout drain handling.
 - `cmd/gengowatcher`
   - CLI entrypoint that loads config, validates monitors, and launches TUI runtime.
 
@@ -70,6 +71,12 @@ go test ./...
 
 ```bash
 go test ./internal/config ./internal/monitor/rss ./internal/monitor/websocket ./internal/dedupe ./internal/reaction ./internal/telemetry/sqlite ./internal/pipeline -v
+```
+
+- TUI reliability focus:
+
+```bash
+go test -count=1 ./internal/ui
 ```
 
 ## Editing Guidance for Agents

@@ -16,6 +16,8 @@ Primary goals:
   - Public, stable contracts (`Job`, `JobEvent`, `Monitor`).
 - `internal/config`
   - Config loading, defaults, env overrides, validation.
+- `internal/app`
+  - Runtime watcher orchestration and monitor fan-in.
 - `internal/monitor/websocket`
   - WebSocket ingestion and reconnect behavior.
 - `internal/monitor/rss`
@@ -28,6 +30,8 @@ Primary goals:
   - First-seen routing + telemetry handoff.
 - `internal/telemetry/sqlite`
   - Local telemetry persistence and rolling latency snapshot.
+- `internal/ui`
+  - Bubble Tea model and runtime bridge from watcher events to UI messages.
 
 ## Data Model and Contracts
 
@@ -110,13 +114,23 @@ Config guardrail in `internal/config/config.go` requires RSS polling interval >=
 - Provides `latency_5m` rolling aggregate view.
 - Includes sink lifecycle/error handling (empty DSN, unavailable/closed sink states).
 
+### TUI Runtime Bridge
+
+`internal/ui/tui.go`:
+
+- Uses a bounded event channel between watcher callbacks and Bubble Tea message handling.
+- Treats enqueue overflow as a counted drop (non-blocking hot path).
+- Aggregates dropped-event reporting on interval with final flush during shutdown.
+- Emits explicit observability signal when watcher join exceeds timeout.
+- Applies bounded post-timeout drain window to capture late drops and preserve late watcher fatal error propagation when available.
+
 ## Current Risk Notes
 
 Documented operational follow-ups:
 
-1. Router dedupe key is currently ID-centric and should add canonical fallback strategy.
-2. Async dispatch is currently unbounded and should move to bounded backpressure control.
-3. Telemetry write failures should be surfaced explicitly for operators.
+1. Percentile telemetry views (p50/p90/p99) and source-asymmetry visibility are still pending.
+2. Full command-input/log-viewer UX remains deferred until after Phase 3 baseline stabilizes.
+3. State persistence and notification delivery remain deferred to post-baseline phases.
 
 See `docs/project-status.md` for active priorities.
 

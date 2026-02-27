@@ -386,7 +386,7 @@ for event := range events {
 2. **Phase 2 (Completed):** WebSocket + RSS monitors (RSS/WS parity patch robustness is complete)
 3. **Phase 2.5 (Hardening Completed):** RSS/WS reliability, first-seen reaction pipeline, telemetry instrumentation, canonical dedupe fallback, bounded async backpressure, telemetry error surfacing
 4. **Phase 2.6 (Completed):** Runtime pipeline wiring (`monitor -> router -> reaction + telemetry`), WebSocket reconnect jitter, RSS conditional polling headers
-5. **Phase 3 (In Progress):** TUI baseline (live first-seen feed, Jobs+Stats tabs, CLI launch path; command-input/log-viewer/state persistence deferred)
+5. **Phase 3 (In Progress):** TUI baseline (live first-seen feed, Jobs+Stats tabs, CLI launch path; event-bridge shutdown/backpressure hardening landed; command-input/log-viewer/state persistence deferred)
 6. **Phase 4:** State persistence, notifications
 7. **Phase 5:** Email + Website monitors
 8. **Phase 6:** CLI commands, polish

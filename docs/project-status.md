@@ -1,11 +1,12 @@
 # Project Status
 
-Last updated: 2026-02-26
+Last updated: 2026-02-27
 
 ## Current Phase
 
 - Phase 3 baseline is in progress (Jobs+Stats TUI + CLI launch path).
-- Full test suite is passing (`go test ./...`).
+- TUI runtime bridge reliability hardening is complete for this pass (drop aggregation, timeout observability, bounded post-timeout drain, preserved late watcher error propagation).
+- Last recorded full-suite pass: `go test ./...`.
 - Work is on `main` with a focused commit series for each task area.
 
 ## Completed in Phase 2.5
@@ -26,7 +27,7 @@ Last updated: 2026-02-26
 
 ## Review Outcome
 
-- Status: Phase 3 baseline is in progress, with non-blocking telemetry aggregate improvements remaining.
+- Status: Phase 3 baseline is in progress, with TUI shutdown/backpressure reliability follow-ups from review now implemented.
 - Security posture: no critical injection/XSS-style findings in this scope.
 
 ## Must-Fix Before Phase 3
@@ -36,6 +37,8 @@ Last updated: 2026-02-26
 
 ## Verification Evidence
 
+- Latest TUI reliability suite passed:
+  - `go test -count=1 ./internal/ui`
 - Focused suites passed:
   - `go test ./internal/ui ./internal/app ./internal/pipeline ./internal/monitor/rss ./internal/monitor/websocket ./internal/reaction -v`
 - CLI suite passed:
@@ -51,6 +54,8 @@ Last updated: 2026-02-26
 
 ## Update Log
 
+- 2026-02-27: Hardened TUI event bridge shutdown/backpressure behavior: aggregated dropped-event reporting, watcher join-timeout observability, bounded post-timeout drain window, and late watcher error propagation during drain.
+- 2026-02-27: Added targeted internal/ui regression coverage for saturated buffer aggregation, timeout observability, post-cancel and post-timeout drop reporting, and post-timeout drain error propagation.
 - 2026-02-26: Started Phase 3 baseline implementation (router first-seen UI hook, watcher OnJobFound callback, Bubble Tea Jobs/Stats model, TUI runtime bridge, CLI entrypoint).
 - 2026-02-26: Completed second-pass review follow-ups (telemetry cancellation timeout, bounded watcher shutdown, instance jitter RNG, query-sensitive URL fallback dedupe, RSS 304 validator refresh) and validated merge readiness.
 - 2026-02-26: Wired runtime monitor-router-reaction-telemetry flow and implemented recommended reconnect jitter plus RSS conditional polling headers.
