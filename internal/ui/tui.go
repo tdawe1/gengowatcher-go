@@ -3,12 +3,15 @@ package ui
 import (
 	"context"
 	"log"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tdawe1/gengowatcher-go/internal/app"
 	"github.com/tdawe1/gengowatcher-go/internal/config"
+	"github.com/tdawe1/gengowatcher-go/internal/notify"
+	"github.com/tdawe1/gengowatcher-go/internal/state"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
 )
 
@@ -25,6 +28,14 @@ var reportDroppedEvents = func(count uint64) {
 
 var reportWatcherJoinTimeout = func(timeout time.Duration) {
 	log.Printf("watcher shutdown exceeded join timeout: timeout=%s", timeout)
+}
+
+var reportStateError = func(err error) {
+	log.Printf("state persistence error: %v", err)
+}
+
+var reportStateDrop = func() {
+	log.Printf("state recorder queue saturated; dropping job event")
 }
 
 type watcherRunner interface {
@@ -72,14 +83,40 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	events := make(chan gengo.JobEvent, tuiEventBuffer)
 	var droppedEvents atomic.Uint64
+	notifier := notify.New(cfg.Notifications)
+	var recorder *state.Recorder
+	model := NewModel()
+
+	if path := strings.TrimSpace(cfg.State.File); path != "" {
+		var err error
+		recorder, err = state.OpenRecorder(path, state.RecorderDeps{
+			OnError: reportStateError,
+			MaxJobs: maxJobs,
+		})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = recorder.Close()
+		}()
+		model = NewModelFromSnapshot(recorder.Snapshot())
+	}
 
 	watcher, err := newWatcher(cfg, app.Deps{
+		Open:   notifier.Open,
+		Notify: notifier.Notify,
 		OnJobFound: func(ev gengo.JobEvent) {
+			if recorder != nil && !recorder.Record(ev) {
+				reportStateDrop()
+			}
 			select {
 			case events <- ev:
 			default:
@@ -120,7 +157,6 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		}
 	}()
 
-	model := NewModel()
 	model.events = events
 	model.done = runCtx.Done()
 	program := newTeaProgram(model)

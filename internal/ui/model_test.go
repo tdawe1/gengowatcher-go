@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/tdawe1/gengowatcher-go/internal/state"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
 )
 
@@ -110,5 +112,27 @@ func TestModel_ViewRendersJobsAndStatsTabs(t *testing.T) {
 	statsView := m.View()
 	if !strings.Contains(statsView, "Stats") || !strings.Contains(statsView, "Total Found: 1") {
 		t.Fatalf("expected stats view to include tab and totals, got %q", statsView)
+	}
+}
+
+func TestNewModelFromSnapshot_SeedsJobsAndStats(t *testing.T) {
+	stats := gengo.NewStats()
+	stats.TotalFound = 4
+	stats.SessionFound = 1
+	stats.BySource[gengo.SourceRSS] = 4
+	stats.LastUpdated = time.Date(2026, time.March, 15, 1, 2, 3, 0, time.UTC)
+
+	m := NewModelFromSnapshot(state.Snapshot{
+		Jobs: []*gengo.Job{
+			{ID: "job-1", Title: "JP -> EN", Reward: 12.5},
+		},
+		Stats: stats,
+	})
+
+	if len(m.jobs) != 1 || m.jobs[0].ID != "job-1" {
+		t.Fatalf("expected seeded jobs, got %#v", m.jobs)
+	}
+	if m.stats == nil || m.stats.TotalFound != 4 || m.stats.BySource[gengo.SourceRSS] != 4 {
+		t.Fatalf("expected seeded stats, got %#v", m.stats)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/tdawe1/gengowatcher-go/internal/app"
 	"github.com/tdawe1/gengowatcher-go/internal/config"
+	"github.com/tdawe1/gengowatcher-go/internal/state"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
 )
 
@@ -74,9 +75,13 @@ func TestRun_StartsWatcherAndBridgesEvents(t *testing.T) {
 
 	watcher := &stubWatcher{started: make(chan struct{}, 1)}
 	var onJobFound func(gengo.JobEvent)
+	var openFn func(context.Context, string) error
+	var notifyFn func(context.Context, string) error
 
 	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
 		onJobFound = deps.OnJobFound
+		openFn = deps.Open
+		notifyFn = deps.Notify
 		return watcher, nil
 	}
 
@@ -125,6 +130,117 @@ func TestRun_StartsWatcherAndBridgesEvents(t *testing.T) {
 	case <-watcher.started:
 	case <-time.After(time.Second):
 		t.Fatal("expected watcher Start to be invoked")
+	}
+	if openFn == nil {
+		t.Fatal("expected Open callback to be wired")
+	}
+	if notifyFn == nil {
+		t.Fatal("expected Notify callback to be wired")
+	}
+}
+
+func TestRun_LoadsPersistedSnapshotIntoModel(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+	})
+
+	statePath := t.TempDir() + "/state.json"
+	store, err := state.New(statePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	stats := gengo.NewStats()
+	stats.TotalFound = 5
+	stats.BySource[gengo.SourceRSS] = 5
+	if err := store.Save(state.Snapshot{
+		Jobs:  []*gengo.Job{{ID: "job-persisted", Title: "Persisted job"}},
+		Stats: stats,
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		}), nil
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		m := model.(Model)
+		if len(m.jobs) != 1 || m.jobs[0].ID != "job-persisted" {
+			t.Fatalf("expected model to load persisted jobs, got %#v", m.jobs)
+		}
+		if m.stats == nil || m.stats.TotalFound != 5 {
+			t.Fatalf("expected model to load persisted stats, got %#v", m.stats)
+		}
+		return stubProgram{run: func() (tea.Model, error) { return model, nil }}
+	}
+
+	err = Run(context.Background(), &config.Config{
+		State: config.StateConfig{File: statePath},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestRun_PersistsFirstSeenJobsToState(t *testing.T) {
+	prevNewWatcher := newWatcher
+	prevNewTeaProgram := newTeaProgram
+	t.Cleanup(func() {
+		newWatcher = prevNewWatcher
+		newTeaProgram = prevNewTeaProgram
+	})
+
+	statePath := t.TempDir() + "/state.json"
+	var onJobFound func(gengo.JobEvent)
+
+	newWatcher = func(cfg *config.Config, deps app.Deps) (watcherRunner, error) {
+		onJobFound = deps.OnJobFound
+		return watcherRunnerFunc(func(ctx context.Context) error {
+			<-ctx.Done()
+			return nil
+		}), nil
+	}
+
+	newTeaProgram = func(model tea.Model) teaProgramRunner {
+		return stubProgram{run: func() (tea.Model, error) {
+			if onJobFound == nil {
+				t.Fatal("expected OnJobFound callback to be set")
+			}
+			onJobFound(gengo.NewJobEvent(gengo.EventJobFound, gengo.SourceRSS, &gengo.Job{
+				ID:    "job-state",
+				Title: "Persist me",
+				URL:   "https://gengo.com/jobs/state",
+			}))
+			return model, nil
+		}}
+	}
+
+	err := Run(context.Background(), &config.Config{
+		State: config.StateConfig{File: statePath},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	store, err := state.New(statePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	if len(snapshot.Jobs) != 1 || snapshot.Jobs[0].ID != "job-state" {
+		t.Fatalf("expected persisted job, got %#v", snapshot.Jobs)
+	}
+	if snapshot.Stats == nil || snapshot.Stats.TotalFound != 1 || snapshot.Stats.BySource[gengo.SourceRSS] != 1 {
+		t.Fatalf("expected persisted stats, got %#v", snapshot.Stats)
 	}
 }
 

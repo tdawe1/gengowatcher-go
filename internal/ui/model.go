@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/tdawe1/gengowatcher-go/internal/state"
 	"github.com/tdawe1/gengowatcher-go/pkg/gengo"
 )
 
@@ -92,6 +93,27 @@ func NewModel() Model {
 		stats:      gengo.NewStats(),
 		currentTab: tabJobs,
 	}
+}
+
+func NewModelFromSnapshot(snapshot state.Snapshot) Model {
+	model := NewModel()
+	snapshot = stateSnapshotOrDefault(snapshot)
+	model.jobs = snapshot.Jobs
+	model.stats = snapshot.Stats
+	return model
+}
+
+func stateSnapshotOrDefault(snapshot state.Snapshot) state.Snapshot {
+	if snapshot.Stats == nil {
+		snapshot.Stats = gengo.NewStats()
+	}
+	if snapshot.Jobs == nil {
+		snapshot.Jobs = []*gengo.Job{}
+	}
+	if snapshot.Stats.BySource == nil {
+		snapshot.Stats.BySource = map[gengo.Source]int{}
+	}
+	return snapshot
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
